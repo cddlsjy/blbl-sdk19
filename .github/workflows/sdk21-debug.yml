@@ -1,4 +1,4 @@
-name: Debug LollipopPlus APK
+name: Android Debug
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "Version name (e.g. 0.1.1)"
         required: true
       changelog:
-        description: "Release notes (optional)"
+        description: "Release notes/changelog (optional; supports multiline)"
         required: false
         default: ""
 
@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  build-lollipopplus:
+  build-debug:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,15 +30,10 @@ jobs:
       - name: Build all debug APKs
         run: ./gradlew assembleDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
 
-      - name: Verify LollipopPlus APK exists
-        run: |
-          if [ ! -f "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" ]; then
-            echo "ERROR: LollipopPlus APK not found"
-            exit 1
-          fi
+      - name: List generated APKs
+        run: find app/build/outputs/apk -name "*.apk"
 
-      - name: Upload to R2 (LollipopPlus)
-        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+      - name: Upload debug APKs to R2
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -48,10 +43,16 @@ jobs:
           VERSION_NAME: ${{ inputs.version_name }}
         run: |
           set -euo pipefail
+          if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ]; then
+            echo "R2 variables not set, skipping upload."
+            exit 0
+          fi
           if ! command -v aws >/dev/null 2>&1; then
+            echo "aws cli not found, installing..."
             sudo apt-get update
             sudo apt-get install -y awscli
           fi
+
           export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
           export AWS_REGION="auto"
@@ -61,31 +62,26 @@ jobs:
           CLEAN_VERSION="${VERSION_NAME#v}"
           KEY_PREFIX="${R2_PREFIX:-blbl}"
           KEY_PREFIX="${KEY_PREFIX%/}"
-          [ -n "${KEY_PREFIX}" ] && KEY_PREFIX="${KEY_PREFIX}/"
+          if [ -n "${KEY_PREFIX}" ]; then
+            KEY_PREFIX="${KEY_PREFIX}/"
+          fi
 
           printf '%s' "${CLEAN_VERSION}" > version
           aws s3 cp "version" "s3://${R2_BUCKET}/${KEY_PREFIX}version" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
 
-          aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" \
-            "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-lollipopplus-debug.apk" \
-            --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
-          aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" \
-            "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-lollipopplus-debug.apk" \
-            --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
+          aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
+          aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
 
-      - name: Publish to GitHub Release
+          aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
+          aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
+
+      - name: Publish debug APKs to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION_NAME: ${{ inputs.version_name }}
           RELEASE_TAG: ${{ startsWith(inputs.version_name, 'v') && inputs.version_name || format('v{0}', inputs.version_name) }}
           CHANGELOG: ${{ inputs.changelog }}
         run: |
-          APK_PATH="app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: APK not found at $APK_PATH"
-            exit 1
-          fi
-
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             if [ -n "${CHANGELOG:-}" ]; then
               printf '%s' "$CHANGELOG" > changelog.md
@@ -100,4 +96,5 @@ jobs:
             fi
           fi
 
-          gh release upload "$RELEASE_TAG" "$APK_PATH#blbl-android-${VERSION_NAME}-lollipopplus-debug.apk" --clobber
+          gh release upload "$RELEASE_TAG" "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk#blbl-android-${VERSION_NAME}-kitkat-debug.apk" --clobber
+          gh release upload "$RELEASE_TAG" "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk#blbl-android-${VERSION_NAME}-lollipopplus-debug.apk" --clobber
