@@ -61,7 +61,7 @@ class SettingsActivity : BaseActivity() {
     } catch (e: UnsatisfiedLinkError) {
         android.util.Log.e("Settings", "Device does not support MediaPlayer", e)
         // 给用户一个短暂提示（需要 Looper，但此时还没有，所以可能不显示，没关系）
-        Toast.makeText(applicationContext, "此设备不支持硬件解码，设置页面无法打开", Toast.LENGTH_LONG).show()
+        
         finish()
         return
     }
