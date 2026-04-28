@@ -1,124 +1,73 @@
-name: Unpack ZIP and Move Subdir to Root
+name: Android Debug
 
 on:
-  push:
-    paths: ['**.zip']
   workflow_dispatch:
     inputs:
-      zip_file:
-        description: '要解压的 ZIP 文件名（例如 "archive.zip"）'
+      version_name:
+        description: "Version name (e.g. 0.1.1)"
+        required: true
+      changelog:
+        description: "Release notes/changelog (optional; supports multiline)"
         required: false
-        default: ''
-      subdir:
-        description: '要移动到根目录的子目录名（可选，独立于 ZIP）'
-        required: false
-        default: ''
+        default: ""
+
+permissions:
+  contents: write
 
 jobs:
-  unpack-and-move:
+  build-debug:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+          cache: "gradle"
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+      - name: Build all debug APKs
+        run: ./gradlew assembleDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
 
-      - name: 自动解压并移动子目录内容
-        if: github.event_name == 'push'
+      # 可选：列出所有生成的 APK 以便调试
+      - name: List generated APKs
+        run: find app/build/outputs/apk -name "*.apk"
+
+      - name: Upload debug APKs to R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || vars.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET || vars.R2_BUCKET }}
+          R2_PREFIX: ${{ vars.R2_PREFIX || secrets.R2_PREFIX }}
+          VERSION_NAME: ${{ inputs.version_name }}
         run: |
-          shopt -s dotglob
-          zip_files=(*.zip)
-          count=${#zip_files[@]}
-
-          if [ $count -eq 0 ]; then
-            echo "没有找到 ZIP 文件"
-            exit 0
-          elif [ $count -eq 1 ]; then
-            zipfile="${zip_files[0]}"
-            echo "自动解压: $zipfile"
-            temp_dir="${zipfile%.zip}_temp_$$"
-            mkdir -p "$temp_dir"
-            unzip -o "$zipfile" -d "$temp_dir"
-
-            if [ -z "$(ls -A "$temp_dir")" ]; then
-              echo "⚠️ ZIP 文件为空"
-              rm -rf "$temp_dir"
-              rm -f "$zipfile"
-              exit 0
-            fi
-
-            items=("$temp_dir"/*)
-            if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
-              subdir="${items[0]}"
-              echo "检测到单一顶层子目录: $subdir，将其内容移动到根目录"
-              cp -rf "$subdir"/. .
-              rm -rf "$subdir"
-            else
-              echo "ZIP 内没有单一顶层目录，直接移动所有内容"
-              cp -rf "$temp_dir"/. .
-            fi
-
-            rm -rf "$temp_dir"
-            rm -f "$zipfile"
-            echo "✅ 解压并移动完成"
-          else
-            echo "检测到多个 ZIP 文件 ($count 个)，不自动解压。"
-            echo "请手动运行 workflow_dispatch 并指定 zip_file。"
-            for f in "${zip_files[@]}"; do
-              echo "  - $f"
-            done
+          set -euo pipefail
+          if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ]; then
+            echo "R2 variables not set, skipping upload."
             exit 0
           fi
-
-      - name: 手动解压并移动子目录内容
-        if: github.event_name == 'workflow_dispatch' && inputs.zip_file != ''
-        run: |
-          shopt -s dotglob
-          zipfile="${{ inputs.zip_file }}"
-          if [ ! -f "$zipfile" ]; then
-            echo "❌ 文件 '$zipfile' 不存在"
-            ls -1 *.zip 2>/dev/null || echo "（当前目录无 zip 文件）"
-            exit 1
-          fi
-          echo "手动解压: $zipfile"
-          temp_dir="${zipfile%.zip}_temp_$$"
-          mkdir -p "$temp_dir"
-          unzip -o "$zipfile" -d "$temp_dir"
-
-          items=("$temp_dir"/*)
-          if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
-            subdir="${items[0]}"
-            echo "检测到单一顶层子目录: $subdir，将其内容移动到根目录"
-            cp -rf "$subdir"/. .
-            rm -rf "$subdir"
-          else
-            echo "ZIP 内没有单一顶层目录，直接移动所有内容"
-            cp -rf "$temp_dir"/. .
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "aws cli not found, installing..."
+            sudo apt-get update
+            sudo apt-get install -y awscli
           fi
 
-          rm -rf "$temp_dir"
-          rm -f "$zipfile"
-          echo "✅ 解压并移动完成"
+          export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
+          export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
+          export AWS_REGION="auto"
+          export AWS_EC2_METADATA_DISABLED=true
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-      - name: 移动指定的子目录到根目录
-        if: github.event_name == 'workflow_dispatch' && inputs.subdir != ''
-        run: |
-          shopt -s dotglob
-          SUBDIR="${{ inputs.subdir }}"
-          if [ -d "$SUBDIR" ]; then
-            echo "移动子目录 '$SUBDIR' 的内容到根目录"
-            cp -rf "$SUBDIR"/. .
-            rm -rf "$SUBDIR"
-            echo "✅ 子目录已提升到根目录"
-          else
-            echo "❌ 子目录 '$SUBDIR' 不存在"
-            exit 1
+          CLEAN_VERSION="${VERSION_NAME#v}"
+          KEY_PREFIX="${R2_PREFIX:-blbl}"
+          KEY_PREFIX="${KEY_PREFIX%/}"
+          if [ -n "${KEY_PREFIX}" ]; then
+            KEY_PREFIX="${KEY_PREFIX}/"
           fi
 
-      - name: 提交更改
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add . -- ':!.github'
-          git diff --staged --quiet || git commit -m "解压 ZIP 并整理目录结构"
-          git push
+          # 上传 version 文件
+          printf '%s' "${CLEAN_VERSION}" > version
+          aws s3 cp "version" "s3://${R2_BUCKET}/${KEY_PREFIX}version" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
+
+          # 循环上传所有 debug APK
