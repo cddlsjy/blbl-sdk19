@@ -1,79 +1,107 @@
-name: Upload KitKat Debug APK
+name: Android Debug
 
 on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: 'Version name (e.g. 0.1.1)'
+        description: "Version name (e.g. 0.1.1)"
         required: true
-        type: string
       changelog:
-        description: 'Release notes'
+        description: "Release notes/changelog (optional; supports multiline)"
         required: false
-        default: ''
-        type: string
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-debug:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
-      - name: Grant execute permission
-        run: chmod +x gradlew
+          distribution: "temurin"
+          java-version: "17"
+          cache: "gradle"
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
       - name: Build all debug APKs
         run: ./gradlew assembleDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
-      - name: Verify KitKat APK
-        run: test -f app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk
-      - name: Upload to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version_name }}
-          NOTES: ${{ inputs.changelog }}
-        run: |
-          TAG="v${VERSION}"
-          APK="app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk"
-          if ! gh release view "$TAG" &>/dev/null; then
-            if [ -n "$NOTES" ]; then
-              echo "$NOTES" | gh release create "$TAG" --title "$TAG" --notes-file -
-            else
-              gh release create "$TAG" --title "$TAG" --generate-notes
-            fi
-          elif [ -n "$NOTES" ]; then
-            echo "$NOTES" | gh release edit "$TAG" --notes-file -
-          fi
-          gh release upload "$TAG" "$APK#blbl-android-${VERSION}-kitkat-debug.apk" --clobber
-      - name: Upload to R2 (optional)
-        if: env.R2_ACCESS_KEY_ID != ''
+
+      - name: List generated APKs
+        run: find app/build/outputs/apk -name "*.apk"
+
+      # 上传到 R2（保持原有逻辑，修正循环）
+      - name: Upload debug APKs to R2
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_PREFIX: ${{ vars.R2_PREFIX }}
-          VERSION: ${{ inputs.version_name }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || vars.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET || vars.R2_BUCKET }}
+          R2_PREFIX: ${{ vars.R2_PREFIX || secrets.R2_PREFIX }}
+          VERSION_NAME: ${{ inputs.version_name }}
         run: |
-          sudo apt-get update && sudo apt-get install -y awscli
-          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
-          export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          set -euo pipefail
+          if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ]; then
+            echo "R2 variables not set, skipping upload."
+            exit 0
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "aws cli not found, installing..."
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+
+          export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
+          export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
           export AWS_REGION="auto"
           export AWS_EC2_METADATA_DISABLED=true
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          CLEAN_VERSION="${VERSION#v}"
-          PREFIX="${R2_PREFIX:-blbl}"
-          PREFIX="${PREFIX%/}/"
-          echo "$CLEAN_VERSION" > version
-          aws s3 cp version "s3://${R2_BUCKET}/${PREFIX}version" --endpoint-url "$ENDPOINT" --content-type text/plain --cache-control no-cache
-          aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" \
-            "s3://${R2_BUCKET}/${PREFIX}blbl-${CLEAN_VERSION}-kitkat-debug.apk" \
-            --endpoint-url "$ENDPOINT" --content-type application/vnd.android.package-archive
-          aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" \
-            "s3://${R2_BUCKET}/${PREFIX}blbl-latest-kitkat-debug.apk" \
-            --endpoint-url "$ENDPOINT" --content-type application/vnd.android.package-archive --cache-control no-cache
+
+          CLEAN_VERSION="${VERSION_NAME#v}"
+          KEY_PREFIX="${R2_PREFIX:-blbl}"
+          KEY_PREFIX="${KEY_PREFIX%/}"
+          if [ -n "${KEY_PREFIX}" ]; then
+            KEY_PREFIX="${KEY_PREFIX}/"
+          fi
+
+          printf '%s' "${CLEAN_VERSION}" > version
+          aws s3 cp "version" "s3://${R2_BUCKET}/${KEY_PREFIX}version" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
+
+          # 上传 KitKat APK
+          aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
+          aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
+
+          # 上传 LollipopPlus APK
+          aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
+          aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
+
+      # 上传到 GitHub Release
+      - name: Publish debug APKs to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          RELEASE_TAG: ${{ startsWith(inputs.version_name, 'v') && inputs.version_name || format('v{0}', inputs.version_name) }}
+          CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          # 创建或更新 Release
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if [ -n "${CHANGELOG:-}" ]; then
+              printf '%s' "$CHANGELOG" > changelog.md
+              gh release edit "$RELEASE_TAG" --notes-file changelog.md
+            fi
+          else
+            if [ -n "${CHANGELOG:-}" ]; then
+              printf '%s' "$CHANGELOG" > changelog.md
+              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file changelog.md --target "$GITHUB_SHA"
+            else
+              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA"
+            fi
+          fi
+
+          # 上传 KitKat APK
+          gh release upload "$RELEASE_TAG" "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk#blbl-android-${VERSION_NAME}-kitkat-debug.apk" --clobber
+          # 上传 LollipopPlus APK
+          gh release upload "$RELEASE_TAG" "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk#blbl-android-${VERSION_NAME}-lollipopplus-debug.apk" --clobber
