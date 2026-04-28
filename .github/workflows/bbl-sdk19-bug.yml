@@ -12,7 +12,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read   # 不需要写入 Release，改为 read 即可
 
 jobs:
   build-debug:
@@ -33,7 +33,7 @@ jobs:
       - name: List generated APKs
         run: find app/build/outputs/apk -name "*.apk"
 
-      # 上传到 R2（保持原有逻辑，修正循环）
+      # 可选：上传到 R2（保留原逻辑，未配置则跳过）
       - name: Upload debug APKs to R2
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -70,38 +70,23 @@ jobs:
           printf '%s' "${CLEAN_VERSION}" > version
           aws s3 cp "version" "s3://${R2_BUCKET}/${KEY_PREFIX}version" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
 
-          # 上传 KitKat APK
           aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
           aws s3 cp "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
 
-          # 上传 LollipopPlus APK
           aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
           aws s3 cp "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
 
-      # 上传到 GitHub Release
-      - name: Publish debug APKs to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION_NAME: ${{ inputs.version_name }}
-          RELEASE_TAG: ${{ startsWith(inputs.version_name, 'v') && inputs.version_name || format('v{0}', inputs.version_name) }}
-          CHANGELOG: ${{ inputs.changelog }}
-        run: |
-          # 创建或更新 Release
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            if [ -n "${CHANGELOG:-}" ]; then
-              printf '%s' "$CHANGELOG" > changelog.md
-              gh release edit "$RELEASE_TAG" --notes-file changelog.md
-            fi
-          else
-            if [ -n "${CHANGELOG:-}" ]; then
-              printf '%s' "$CHANGELOG" > changelog.md
-              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file changelog.md --target "$GITHUB_SHA"
-            else
-              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA"
-            fi
-          fi
+      # 关键修改：将生成的 APK 上传为 GitHub Actions 产物，方便下载
+      - name: Upload KitKat APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-kitkat-debug
+          path: app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk
+          if-no-files-found: error
 
-          # 上传 KitKat APK
-          gh release upload "$RELEASE_TAG" "app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk#blbl-android-${VERSION_NAME}-kitkat-debug.apk" --clobber
-          # 上传 LollipopPlus APK
-          gh release upload "$RELEASE_TAG" "app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk#blbl-android-${VERSION_NAME}-lollipopplus-debug.apk" --clobber
+      - name: Upload LollipopPlus APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-lollipopplus-debug
+          path: app/build/outputs/apk/lollipopplus/debug/app-lollipopplus-debug.apk
+          if-no-files-found: error
