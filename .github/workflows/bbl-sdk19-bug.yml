@@ -1,4 +1,4 @@
-name: Android API19 Debug
+name: Debug KitKat APK
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "Version name (e.g. 0.1.1)"
         required: true
       changelog:
-        description: "Release notes/changelog (optional; supports multiline)"
+        description: "Release notes (optional)"
         required: false
         default: ""
 
@@ -15,12 +15,10 @@ permissions:
   contents: write
 
 jobs:
-  build-api19-debug:
+  build-kitkat:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: master  # 修改这里：从 blbl-api19 改为 master
       - uses: actions/setup-java@v4
         with:
           distribution: "temurin"
@@ -28,13 +26,11 @@ jobs:
           cache: "gradle"
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
-      - name: Mark API19 app label
-        run: |
-          set -euo pipefail
-          sed -i 's|<string name="app_name">.*</string>|<string name="app_name">Blbl-api19-debug</string>|' app/src/main/res/values/strings.xml
-      - name: Build API19 debug APK
-        run: ./gradlew :app:assembleKitkatDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
-      - name: Upload API19 debug APK to R2 (optional)
+
+      - name: Build KitKat debug APK
+        run: ./gradlew assembleKitkatDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
+
+      - name: Upload to R2
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -49,41 +45,47 @@ jobs:
             exit 0
           fi
           if ! command -v aws >/dev/null 2>&1; then
-            echo "aws cli not found, installing..."
             sudo apt-get update
             sudo apt-get install -y awscli
           fi
+
           export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
           export AWS_REGION="auto"
           export AWS_EC2_METADATA_DISABLED=true
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
           CLEAN_VERSION="${VERSION_NAME#v}"
           KEY_PREFIX="${R2_PREFIX:-blbl}"
           KEY_PREFIX="${KEY_PREFIX%/}"
-          if [ -n "${KEY_PREFIX}" ]; then
-            KEY_PREFIX="${KEY_PREFIX}/"
+          [ -n "${KEY_PREFIX}" ] && KEY_PREFIX="${KEY_PREFIX}/"
+
+          # 上传 version 文件
+          printf '%s' "${CLEAN_VERSION}" > version
+          aws s3 cp "version" "s3://${R2_BUCKET}/${KEY_PREFIX}version" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
+
+          # 上传 kitkat APK
+          APK_PATH="app/build/outputs/apk/kitkatDebug/app-kitkat-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK not found at $APK_PATH"
+            exit 1
           fi
-          APK_PATH="app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk"
-          printf '%s' "${CLEAN_VERSION}" > version-api19-debug
-          aws s3 cp "version-api19-debug" "s3://${R2_BUCKET}/${KEY_PREFIX}version-api19-debug" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
-          aws s3 cp "${APK_PATH}" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-api19-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
-          aws s3 cp "${APK_PATH}" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-api19-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
-      - name: Upload API19 debug APK as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-api19-debug-apk
-          path: app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk
-      - name: Publish API19 debug APK to GitHub Release
+          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
+          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-kitkat-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
+
+      - name: Publish to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION_NAME: ${{ inputs.version_name }}
           RELEASE_TAG: ${{ startsWith(inputs.version_name, 'v') && inputs.version_name || format('v{0}', inputs.version_name) }}
           CHANGELOG: ${{ inputs.changelog }}
         run: |
-          set -euo pipefail
-          BUILD_SHA="$(git rev-parse HEAD)"
-          APK_PATH="app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk"
+          APK_PATH="app/build/outputs/apk/kitkatDebug/app-kitkat-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK not found at $APK_PATH"
+            exit 1
+          fi
+
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             if [ -n "${CHANGELOG:-}" ]; then
               printf '%s' "$CHANGELOG" > changelog.md
@@ -92,9 +94,10 @@ jobs:
           else
             if [ -n "${CHANGELOG:-}" ]; then
               printf '%s' "$CHANGELOG" > changelog.md
-              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file changelog.md --target "$BUILD_SHA"
+              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file changelog.md --target "$GITHUB_SHA"
             else
-              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --target "$BUILD_SHA"
+              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA"
             fi
           fi
-          gh release upload "$RELEASE_TAG" "${APK_PATH}#blbl-android-${VERSION_NAME}-api19-debug.apk" --clobber
+
+          gh release upload "$RELEASE_TAG" "$APK_PATH#blbl-android-${VERSION_NAME}-kitkat-debug.apk" --clobber
