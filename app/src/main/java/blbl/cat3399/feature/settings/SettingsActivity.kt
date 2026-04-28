@@ -52,16 +52,21 @@ class SettingsActivity : BaseActivity() {
         )
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-            // 提前触发 MediaPlayer 相关类的加载，捕获异常
+
+// 第一步：尝试加载 MediaPlayer，如果失败则立即结束 Activity
     try {
-        Class.forName("android.media.MediaPlayer")
-        Class.forName("android.media.MediaCodecList")
+        // 使用 Class.forName 并主动触发初始化
+        Class.forName("android.media.MediaPlayer", true, this::class.java.classLoader)
+        Class.forName("android.media.MediaCodecList", true, this::class.java.classLoader)
     } catch (e: UnsatisfiedLinkError) {
-        // 清除 pending exception，避免后续 JNI 调用崩溃
-        android.util.Log.e("Settings", "MediaPlayer init failed", e)
-        // 注意：这里只是避免崩溃，功能可能缺失
+        android.util.Log.e("Settings", "Device does not support MediaPlayer", e)
+        // 给用户一个短暂提示（需要 Looper，但此时还没有，所以可能不显示，没关系）
+        Toast.makeText(applicationContext, "此设备不支持硬件解码，设置页面无法打开", Toast.LENGTH_LONG).show()
+        finish()
+        return
     }
+
+        super.onCreate(savedInstanceState)
         binding = ActivitySettingsBinding.inflate(layoutInflater.cloneInUserScale(this))
         setContentView(binding.root)
         Immersive.apply(this, BiliClient.prefs.fullscreenEnabled)
