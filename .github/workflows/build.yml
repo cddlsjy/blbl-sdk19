@@ -1,4 +1,4 @@
-name: Debug LollipopPlus APK
+name: Android Debug all apk
 
 on:
   workflow_dispatch:
@@ -7,15 +7,15 @@ on:
         description: "Version name (e.g. 0.1.1)"
         required: true
       changelog:
-        description: "Release notes (optional)"
+        description: "Release notes/changelog (optional; supports multiline)"
         required: false
         default: ""
 
 permissions:
-  contents: write
+  contents: read   # 不需要写 release，降级权限
 
 jobs:
-  build-lollipopplus:
+  build-debug:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,11 +26,39 @@ jobs:
           cache: "gradle"
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
-
-      - name: Build LollipopPlus debug APK
-        run: ./gradlew assembleLollipopplusDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
-
-      - name: Upload to R2
+      - name: Build all debug APKs
+        run: ./gradlew assembleDebug -PversionName=${{ inputs.version_name }} -PversionCode=${{ github.run_number }}
+      
+      # 查找所有 debug APK 并将路径存入环境变量供后续步骤使用
+      - name: Find all debug APKs
+        id: find_apks
+        run: |
+          # 查找所有 debug 变体的 APK（通常路径包含 /debug/ 且以 .apk 结尾）
+          mapfile -t apk_paths < <(find app/build/outputs/apk -type f -name "*debug*.apk" | sort)
+          if [ ${#apk_paths[@]} -eq 0 ]; then
+            echo "No debug APK found!"
+            exit 1
+          fi
+          echo "Found ${#apk_paths[@]} APK(s):"
+          printf '  %s\n' "${apk_paths[@]}"
+          # 将路径列表写成空格分隔的字符串，方便后续步骤使用
+          echo "apk_paths=${apk_paths[*]}" >> $GITHUB_OUTPUT
+          # 同时保存为多行变量（用于 artifact 上传）
+          echo "apk_paths_list<<EOF" >> $GITHUB_OUTPUT
+          printf '%s\n' "${apk_paths[@]}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      # 上传所有 debug APK 到 GitHub Actions Artifact（分别上传，保留各自文件名）
+      - name: Upload all debug APKs as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apks
+          path: |
+            ${{ steps.find_apks.outputs.apk_paths_list }}
+          if-no-files-found: error
+      
+      # 可选：上传到 R2（全部 APK 都上传）
+      - name: Upload debug APKs to R2 (optional)
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -45,59 +73,54 @@ jobs:
             exit 0
           fi
           if ! command -v aws >/dev/null 2>&1; then
+            echo "aws cli not found, installing..."
             sudo apt-get update
             sudo apt-get install -y awscli
           fi
-
           export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
           export AWS_REGION="auto"
           export AWS_EC2_METADATA_DISABLED=true
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
           CLEAN_VERSION="${VERSION_NAME#v}"
           KEY_PREFIX="${R2_PREFIX:-blbl}"
           KEY_PREFIX="${KEY_PREFIX%/}"
-          [ -n "${KEY_PREFIX}" ] && KEY_PREFIX="${KEY_PREFIX}/"
-
-          # 上传 version 文件
+          if [ -n "${KEY_PREFIX}" ]; then
+            KEY_PREFIX="${KEY_PREFIX}/"
+          fi
+          
+          # 上传 version 文件（覆盖写入）
           printf '%s' "${CLEAN_VERSION}" > version
           aws s3 cp "version" "s3://${R2_BUCKET}/${KEY_PREFIX}version" --endpoint-url "${ENDPOINT}" --content-type "text/plain" --cache-control "no-cache"
-
-          # 上传 lollipopplus APK
-          APK_PATH="app/build/outputs/apk/lollipopplusDebug/app-lollipopplus-debug.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: APK not found at $APK_PATH"
-            exit 1
-          fi
-          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-${CLEAN_VERSION}-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
-          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY_PREFIX}blbl-latest-lollipopplus-debug.apk" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
-
-      - name: Publish to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION_NAME: ${{ inputs.version_name }}
-          RELEASE_TAG: ${{ startsWith(inputs.version_name, 'v') && inputs.version_name || format('v{0}', inputs.version_name) }}
-          CHANGELOG: ${{ inputs.changelog }}
+          
+          # 上传每个 debug APK
+          # 从 find_apks 结果中读取路径（再次查找，避免传递问题）
+          find app/build/outputs/apk -type f -name "*debug*.apk" | while read -r apk_path; do
+            # 提取 flavor 名称：假设路径类似 app/build/outputs/apk/kitkat/debug/app-kitkat-debug.apk
+            # 获取 flavor 部分（/apk/ 之后第一个目录）
+            flavor=$(echo "$apk_path" | sed -n 's|.*/apk/\([^/]*\)/debug/.*|\1|p')
+            if [ -z "$flavor" ]; then
+              # 如果没有 flavor（标准路径），则使用 "default"
+              flavor="default"
+            fi
+            # 构造目标文件名：blbl-<version>-<flavor>-debug.apk
+            dest_name="blbl-${CLEAN_VERSION}-${flavor}-debug.apk"
+            echo "Uploading $apk_path -> $dest_name"
+            aws s3 cp "$apk_path" "s3://${R2_BUCKET}/${KEY_PREFIX}${dest_name}" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive"
+            
+            # 同时上传 latest 版本（不带版本号）
+            latest_name="blbl-${flavor}-latest-debug.apk"
+            aws s3 cp "$apk_path" "s3://${R2_BUCKET}/${KEY_PREFIX}${latest_name}" --endpoint-url "${ENDPOINT}" --content-type "application/vnd.android.package-archive" --cache-control "no-cache"
+          done
+      
+      # 可选：如果需要将 changelog 保留为 artifact
+      - name: Save changelog as artifact
+        if: ${{ inputs.changelog != '' }}
         run: |
-          APK_PATH="app/build/outputs/apk/lollipopplusDebug/app-lollipopplus-debug.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: APK not found at $APK_PATH"
-            exit 1
-          fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            if [ -n "${CHANGELOG:-}" ]; then
-              printf '%s' "$CHANGELOG" > changelog.md
-              gh release edit "$RELEASE_TAG" --notes-file changelog.md
-            fi
-          else
-            if [ -n "${CHANGELOG:-}" ]; then
-              printf '%s' "$CHANGELOG" > changelog.md
-              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file changelog.md --target "$GITHUB_SHA"
-            else
-              gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA"
-            fi
-          fi
-
-          gh release upload "$RELEASE_TAG" "$APK_PATH#blbl-android-${VERSION_NAME}-lollipopplus-debug.apk" --clobber
+          printf '%s' "${{ inputs.changelog }}" > changelog.txt
+      - name: Upload changelog artifact
+        if: ${{ inputs.changelog != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: changelog.txt
