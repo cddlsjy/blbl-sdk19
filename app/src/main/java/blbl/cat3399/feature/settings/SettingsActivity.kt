@@ -53,6 +53,15 @@ class SettingsActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+            // 提前触发 MediaPlayer 相关类的加载，捕获异常
+    try {
+        Class.forName("android.media.MediaPlayer")
+        Class.forName("android.media.MediaCodecList")
+    } catch (e: UnsatisfiedLinkError) {
+        // 清除 pending exception，避免后续 JNI 调用崩溃
+        android.util.Log.e("Settings", "MediaPlayer init failed", e)
+        // 注意：这里只是避免崩溃，功能可能缺失
+    }
         binding = ActivitySettingsBinding.inflate(layoutInflater.cloneInUserScale(this))
         setContentView(binding.root)
         Immersive.apply(this, BiliClient.prefs.fullscreenEnabled)
